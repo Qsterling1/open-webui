@@ -26,6 +26,7 @@
 		models,
 		config,
 		showCallOverlay,
+		showGeminiLiveOverlay,
 		tools,
 		toolServers,
 		user as _user,
@@ -33,6 +34,8 @@
 		TTSWorker,
 		temporaryChatEnabled
 	} from '$lib/stores';
+
+	import { getGeminiUserConfig } from '$lib/apis/gemini';
 
 	import {
 		convertHeicToJpeg,
@@ -120,6 +123,9 @@
 	export let imageGenerationEnabled = false;
 	export let webSearchEnabled = false;
 	export let codeInterpreterEnabled = false;
+
+	// Gemini Live state
+	let geminiLiveEnabled = false;
 
 	let inputContent = null;
 
@@ -956,6 +962,15 @@
 		dropzoneElement?.addEventListener('dragleave', onDragLeave);
 
 		await tools.set(await getTools(localStorage.token));
+
+		// Check if Gemini Live is available
+		try {
+			const geminiConfig = await getGeminiUserConfig(localStorage.token);
+			geminiLiveEnabled = geminiConfig?.enabled ?? false;
+		} catch (err) {
+			console.log('Gemini Live not available:', err);
+			geminiLiveEnabled = false;
+		}
 	});
 
 	onDestroy(() => {
@@ -1779,8 +1794,40 @@
 										{/if}
 
 										{#if prompt === '' && files.length === 0 && ($_user?.role === 'admin' || ($_user?.permissions?.chat?.call ?? true))}
-											<div class=" flex items-center">
-												<!-- {$i18n.t('Call')} -->
+											<div class=" flex items-center gap-1">
+												<!-- Gemini Live Button -->
+												{#if geminiLiveEnabled}
+													<Tooltip content="Gemini Live">
+														<button
+															class="bg-gradient-to-r from-blue-500 to-purple-600 text-white hover:from-blue-600 hover:to-purple-700 transition rounded-full p-1.5 self-center"
+															type="button"
+															on:click={async () => {
+																if (selectedModels.length > 1) {
+																	toast.error($i18n.t('Select only one model to call'));
+																	return;
+																}
+
+																try {
+																	let stream = await navigator.mediaDevices.getUserMedia({
+																		audio: true
+																	});
+																	if (stream) {
+																		stream.getTracks().forEach((track) => track.stop());
+																	}
+																	showGeminiLiveOverlay.set(true);
+																} catch (err) {
+																	toast.error($i18n.t('Permission denied when accessing media devices'));
+																}
+															}}
+															aria-label="Gemini Live"
+														>
+															<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="size-5">
+																<path d="M11.983 1.907a.75.75 0 0 0-1.292-.657l-8.5 9.5A.75.75 0 0 0 2.75 12h6.572l-1.305 6.093a.75.75 0 0 0 1.292.657l8.5-9.5A.75.75 0 0 0 17.25 8h-6.572l1.305-6.093Z" />
+															</svg>
+														</button>
+													</Tooltip>
+												{/if}
+												<!-- Voice mode button -->
 												<Tooltip content={$i18n.t('Voice mode')}>
 													<button
 														class=" bg-black text-white hover:bg-gray-900 dark:bg-white dark:text-black dark:hover:bg-gray-100 transition rounded-full p-1.5 self-center"

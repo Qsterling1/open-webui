@@ -8,6 +8,7 @@
 		mobile,
 		showControls,
 		showCallOverlay,
+		showGeminiLiveOverlay,
 		showOverview,
 		showArtifacts,
 		showEmbeds
@@ -15,6 +16,7 @@
 
 	import Controls from './Controls/Controls.svelte';
 	import CallOverlay from './MessageInput/CallOverlay.svelte';
+	import GeminiLiveOverlay from './MessageInput/GeminiLiveOverlay.svelte';
 	import Drawer from '../common/Drawer.svelte';
 	import Artifacts from './Artifacts.svelte';
 	import Embeds from './ChatControls/Embeds.svelte';
@@ -307,4 +309,15 @@
 			</div>
 		{/if}
 	</Pane>
+{/if}
+
+<!-- Gemini Live Overlay (full-screen, independent of controls pane) -->
+{#if $showGeminiLiveOverlay}
+	<GeminiLiveOverlay
+		{modelId}
+		{chatId}
+		on:close={() => {
+			showGeminiLiveOverlay.set(false);
+		}}
+	/>
 {/if}

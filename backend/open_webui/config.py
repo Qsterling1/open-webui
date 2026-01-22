@@ -1047,6 +1047,36 @@ OPENAI_API_BASE_URL = os.environ.get("OPENAI_API_BASE_URL", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_API_BASE_URL = os.environ.get("GEMINI_API_BASE_URL", "")
 
+####################################
+# GEMINI LIVE CONFIGURATION
+####################################
+
+GEMINI_API_KEYS = PersistentConfig(
+    "GEMINI_API_KEYS",
+    "gemini.api_keys",
+    [GEMINI_API_KEY] if GEMINI_API_KEY else [],
+)
+
+GEMINI_LIVE_ENABLED = PersistentConfig(
+    "GEMINI_LIVE_ENABLED",
+    "gemini.live.enabled",
+    os.environ.get("GEMINI_LIVE_ENABLED", "true").lower() == "true",
+)
+
+GEMINI_LIVE_MODELS = [
+    "gemini-2.5-flash-preview-native-audio-dialog",
+    "gemini-2.0-flash-live-001",
+    "gemini-2.0-flash-exp",
+]
+
+GEMINI_LIVE_VOICE = PersistentConfig(
+    "GEMINI_LIVE_VOICE",
+    "gemini.live.voice",
+    os.environ.get("GEMINI_LIVE_VOICE", "Aoede"),
+)
+
+GEMINI_LIVE_VOICES = ["Aoede", "Charon", "Fenrir", "Kore", "Puck"]
+
 
 if OPENAI_API_BASE_URL == "":
     OPENAI_API_BASE_URL = "https://api.openai.com/v1"

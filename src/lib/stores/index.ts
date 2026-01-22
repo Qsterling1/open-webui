@@ -89,6 +89,28 @@ export const showEmbeds = writable(false);
 export const showOverview = writable(false);
 export const showArtifacts = writable(false);
 export const showCallOverlay = writable(false);
+export const showGeminiLiveOverlay = writable(false);
+
+// Gemini Live State
+export interface GeminiLiveState {
+	isConnected: boolean;
+	isConnecting: boolean;
+	isMuted: boolean;
+	isVideoEnabled: boolean;
+	transcript: Array<{ role: string; content: string; timestamp: number }>;
+	currentModel: string;
+	voice: string;
+}
+
+export const geminiLiveState: Writable<GeminiLiveState> = writable({
+	isConnected: false,
+	isConnecting: false,
+	isMuted: false,
+	isVideoEnabled: false,
+	transcript: [],
+	currentModel: 'gemini-2.0-flash-live-001',
+	voice: 'Aoede'
+});
 
 export const artifactCode = writable(null);
 export const artifactContents = writable(null);

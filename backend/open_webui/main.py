@@ -69,6 +69,7 @@ from open_webui.socket.main import (
 )
 from open_webui.routers import (
     audio,
+    gemini,
     images,
     ollama,
     openai,
@@ -565,8 +566,9 @@ class SPAStaticFiles(StaticFiles):
                 raise ex
 
 
-print(
-    rf"""
+try:
+    print(
+        rf"""
  ██████╗ ██████╗ ███████╗███╗   ██╗    ██╗    ██╗███████╗██████╗ ██╗   ██╗██╗
 ██╔═══██╗██╔══██╗██╔════╝████╗  ██║    ██║    ██║██╔════╝██╔══██╗██║   ██║██║
 ██║   ██║██████╔╝█████╗  ██╔██╗ ██║    ██║ █╗ ██║█████╗  ██████╔╝██║   ██║██║
@@ -579,7 +581,9 @@ v{VERSION} - building the best AI user interface.
 {f"Commit: {WEBUI_BUILD_HASH}" if WEBUI_BUILD_HASH != "dev-build" else ""}
 https://github.com/open-webui/open-webui
 """
-)
+    )
+except UnicodeEncodeError:
+    print(f"\nOpen WebUI v{VERSION}\nhttps://github.com/open-webui/open-webui\n")
 
 
 @asynccontextmanager
@@ -1406,6 +1410,7 @@ app.mount("/ws", socket_app)
 
 app.include_router(ollama.router, prefix="/ollama", tags=["ollama"])
 app.include_router(openai.router, prefix="/openai", tags=["openai"])
+app.include_router(gemini.router, prefix="/api/v1/gemini", tags=["gemini"])
 
 
 app.include_router(pipelines.router, prefix="/api/v1/pipelines", tags=["pipelines"])
