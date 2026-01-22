@@ -5,12 +5,27 @@
 	import { toast } from 'svelte-sonner';
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import VideoInputMenu from './CallOverlay/VideoInputMenu.svelte';
+	import {
+		GeminiMemoryManager,
+		formatDuration,
+		getTimeUntilTimeout,
+		generateSessionTitle
+	} from '$lib/utils/geminiMemory';
+	import { OLLAMA_API_BASE_URL } from '$lib/constants';
 
 	const i18n = getContext('i18n');
 	const dispatch = createEventDispatcher();
 
 	export let chatId: string;
 	export let modelId: string;
+
+	// Memory manager for persistent context
+	let memoryManager: GeminiMemoryManager | null = null;
+	let isRestoringContext = false;
+	let lastContextSaveTime = 0;
+	let sessionTimer: ReturnType<typeof setInterval> | null = null;
+	let timeRemaining = 10 * 60; // 10 minutes in seconds
+	let reconnectAttempt = 0;
 
 	// WebSocket and audio refs
 	let ws: WebSocket | null = null;
@@ -162,6 +177,50 @@
 		camera = false;
 	};
 
+	const initializeMemoryManager = () => {
+		if (!memoryManager) {
+			memoryManager = new GeminiMemoryManager({
+				token: localStorage.token,
+				ollamaBaseUrl: OLLAMA_API_BASE_URL,
+				summarizationModel: 'llama3.2', // TODO: Make configurable
+				onSummaryGenerated: (summary) => {
+					log('info', 'Context summary generated');
+					lastContextSaveTime = Date.now();
+					toast.success('Context saved', { duration: 2000 });
+				},
+				onError: (error) => {
+					log('error', `Memory manager error: ${error}`);
+				}
+			});
+		}
+	};
+
+	const startSessionTimer = () => {
+		if (sessionTimer) clearInterval(sessionTimer);
+		timeRemaining = 10 * 60;
+
+		sessionTimer = setInterval(() => {
+			timeRemaining = Math.max(0, Math.floor(getTimeUntilTimeout(sessionStart) / 1000));
+
+			// Warning at 1 minute remaining
+			if (timeRemaining === 60) {
+				toast.warning('Session timeout in 1 minute', { duration: 5000 });
+			}
+
+			// Timeout imminent - trigger save
+			if (timeRemaining === 10) {
+				memoryManager?.triggerSummarization();
+			}
+		}, 1000);
+	};
+
+	const stopSessionTimer = () => {
+		if (sessionTimer) {
+			clearInterval(sessionTimer);
+			sessionTimer = null;
+		}
+	};
+
 	const connectToGeminiLive = async () => {
 		if (!apiKey) {
 			toast.error('No Gemini API key configured');
@@ -171,14 +230,37 @@
 		geminiLiveState.update((s) => ({ ...s, isConnecting: true }));
 		log('info', `Connecting to Gemini Live API with model: ${$geminiLiveState.currentModel}`);
 
+		// Initialize memory manager if needed
+		initializeMemoryManager();
+
+		// Check for existing session to restore
+		let contextPrompt = '';
+		if (reconnectAttempt > 0 && memoryManager?.isActive()) {
+			log('info', 'Attempting context restoration...');
+			isRestoringContext = true;
+			const context = await memoryManager.getContextForReconnection();
+			if (context) {
+				contextPrompt = context;
+				log('info', 'Context loaded for restoration');
+			}
+		}
+
 		try {
 			const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${apiKey}`;
 
 			ws = new WebSocket(wsUrl);
 
-			ws.onopen = () => {
+			ws.onopen = async () => {
 				log('info', 'WebSocket connected, sending setup...');
 				sessionStart = Date.now();
+
+				// Build system instruction with context restoration if available
+				let systemText = `You are a helpful AI assistant. Respond naturally and conversationally. The user has dyslexia and prefers audio responses, so be clear and speak naturally.`;
+
+				if (contextPrompt) {
+					systemText = contextPrompt + '\n\n' + systemText;
+					log('info', 'Context injected into system instruction');
+				}
 
 				const setupMessage = {
 					setup: {
@@ -194,11 +276,7 @@
 							}
 						},
 						systemInstruction: {
-							parts: [
-								{
-									text: `You are a helpful AI assistant. Respond naturally and conversationally. The user has dyslexia and prefers audio responses, so be clear and speak naturally.`
-								}
-							]
+							parts: [{ text: systemText }]
 						}
 					}
 				};
@@ -206,6 +284,19 @@
 				ws?.send(JSON.stringify(setupMessage));
 				geminiLiveState.update((s) => ({ ...s, isConnected: true, isConnecting: false }));
 				log('info', 'Setup sent, connection established!');
+
+				// Start a new memory session or continue existing one
+				if (!memoryManager?.isActive()) {
+					await memoryManager?.startSession($geminiLiveState.currentModel, voice);
+					log('info', 'New memory session started');
+				}
+
+				// Start session timer
+				startSessionTimer();
+
+				// Reset reconnect counter on successful connection
+				reconnectAttempt = 0;
+				isRestoringContext = false;
 
 				// Start audio capture
 				startAudioCapture();
@@ -229,6 +320,15 @@
 										{ role: 'assistant', content: part.text, timestamp: Date.now() }
 									]
 								}));
+
+								// Save assistant response to memory
+								memoryManager?.addTranscript('assistant', part.text);
+
+								// Generate title from first meaningful response if no title yet
+								const session = memoryManager?.getSession();
+								if (session && !session.title && part.text.length > 10) {
+									// Title will be auto-generated on first user message
+								}
 							}
 							if (part.inlineData?.mimeType?.startsWith('audio/')) {
 								const audioData = Uint8Array.from(atob(part.inlineData.data), (c) =>
@@ -254,13 +354,32 @@
 				toast.error('Connection error');
 			};
 
-			ws.onclose = (event) => {
+			ws.onclose = async (event) => {
 				log('warn', `WebSocket closed: code=${event.code}, reason=${event.reason || 'none'}`);
 				geminiLiveState.update((s) => ({ ...s, isConnected: false, isConnecting: false }));
+				stopSessionTimer();
 
 				const sessionDuration = Date.now() - sessionStart;
+
+				// Check if this was likely a timeout (close to 10 minutes)
+				const wasTimeout = sessionDuration > 9 * 60 * 1000;
+
+				if (wasTimeout && memoryManager?.isActive()) {
+					log('info', 'Session likely timed out, marking as timeout');
+					await memoryManager.markTimeout();
+				}
+
 				if (sessionDuration > 5000 && event.code !== 1000 && $showGeminiLiveOverlay) {
 					log('info', 'Unexpected disconnect, attempting reconnect in 2s...');
+					reconnectAttempt++;
+
+					// Show toast about reconnection
+					if (wasTimeout) {
+						toast.info('Session timed out. Reconnecting with context...', { duration: 3000 });
+					} else {
+						toast.info('Connection lost. Reconnecting...', { duration: 2000 });
+					}
+
 					reconnectTimeout = setTimeout(() => {
 						connectToGeminiLive();
 					}, 2000);
@@ -411,6 +530,7 @@
 
 		stopAudioCapture();
 		stopCamera();
+		stopSessionTimer();
 
 		geminiLiveState.update((s) => ({ ...s, isConnected: false }));
 		log('info', 'Disconnected');
@@ -422,6 +542,13 @@
 
 	const closeOverlay = async () => {
 		disconnect();
+
+		// End the memory session properly
+		if (memoryManager?.isActive()) {
+			log('info', 'Ending memory session...');
+			await memoryManager.endSession();
+		}
+
 		showGeminiLiveOverlay.set(false);
 		dispatch('close');
 	};
@@ -522,19 +649,52 @@
 				</div>
 			{/if}
 
-			<!-- Status text -->
-			<div class="text-center text-white text-sm py-4">
-				{#if $geminiLiveState.isConnecting}
-					Connecting...
-				{:else if $geminiLiveState.isConnected}
-					{#if $geminiLiveState.isMuted}
-						Muted
+			<!-- Status bar with timer -->
+			<div class="flex items-center justify-between text-white text-sm py-2 px-4">
+				<!-- Status text -->
+				<div class="flex items-center gap-2">
+					{#if isRestoringContext}
+						<div class="flex items-center gap-2">
+							<svg class="animate-spin size-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+								<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+								<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+							</svg>
+							<span class="text-blue-400">Restoring context...</span>
+						</div>
+					{:else if $geminiLiveState.isConnecting}
+						Connecting...
+					{:else if $geminiLiveState.isConnected}
+						{#if $geminiLiveState.isMuted}
+							<span class="text-red-400">Muted</span>
+						{:else}
+							<span class="text-green-400">● Live</span>
+						{/if}
 					{:else}
-						Listening...
+						<span class="text-gray-400">Disconnected</span>
 					{/if}
-				{:else}
-					Disconnected
-				{/if}
+				</div>
+
+				<!-- Timer and context indicator -->
+				<div class="flex items-center gap-3">
+					{#if lastContextSaveTime > 0}
+						<Tooltip content="Context saved">
+							<div class="flex items-center gap-1 text-green-400 text-xs">
+								<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="size-4">
+									<path fill-rule="evenodd" d="M16.704 4.153a.75.75 0 0 1 .143 1.052l-8 10.5a.75.75 0 0 1-1.127.075l-4.5-4.5a.75.75 0 0 1 1.06-1.06l3.894 3.893 7.48-9.817a.75.75 0 0 1 1.05-.143Z" clip-rule="evenodd" />
+								</svg>
+								<span>Saved</span>
+							</div>
+						</Tooltip>
+					{/if}
+
+					{#if $geminiLiveState.isConnected && timeRemaining > 0}
+						<div
+							class="font-mono text-xs px-2 py-1 rounded {timeRemaining <= 60 ? 'bg-red-600/50 text-red-200' : 'bg-gray-700/50'}"
+						>
+							{formatDuration(timeRemaining)}
+						</div>
+					{/if}
+				</div>
 			</div>
 
 			<!-- Transcript (last few messages) -->
