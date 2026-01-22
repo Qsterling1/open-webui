@@ -25,6 +25,15 @@ from open_webui.env import (
 )
 from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.models.users import UserModel
+from open_webui.models.gemini_live import (
+    GeminiSessions,
+    GeminiTranscripts,
+    GeminiSessionModel,
+    GeminiTranscriptModel,
+    CreateSessionForm,
+    CreateTranscriptForm,
+    UpdateSessionForm,
+)
 
 log = logging.getLogger(__name__)
 
@@ -260,3 +269,286 @@ async def get_gemini_api_key_for_live(user=Depends(get_verified_user)):
         "api_key": api_keys[0],
         "voice": GEMINI_LIVE_VOICE.value,
     }
+
+
+####################################
+# Session Management Endpoints
+####################################
+
+
+@router.post("/session")
+async def create_session(
+    form_data: CreateSessionForm,
+    user: UserModel = Depends(get_verified_user),
+):
+    """Create a new Gemini Live session for persistent memory tracking."""
+    session = GeminiSessions.create_session(
+        user_id=user.id,
+        model=form_data.model,
+        voice=form_data.voice,
+    )
+    if not session:
+        raise HTTPException(status_code=500, detail="Failed to create session")
+    return session
+
+
+@router.get("/session/{session_id}")
+async def get_session(
+    session_id: str,
+    user: UserModel = Depends(get_verified_user),
+):
+    """Get a specific Gemini Live session."""
+    session = GeminiSessions.get_session_by_id(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if session.user_id != user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to access this session")
+    return session
+
+
+@router.get("/sessions")
+async def get_user_sessions(
+    limit: int = 50,
+    offset: int = 0,
+    user: UserModel = Depends(get_verified_user),
+):
+    """Get all Gemini Live sessions for the current user."""
+    sessions = GeminiSessions.get_sessions_by_user_id(
+        user_id=user.id,
+        limit=limit,
+        offset=offset,
+    )
+    return {"sessions": sessions}
+
+
+@router.get("/session/active")
+async def get_active_session(
+    user: UserModel = Depends(get_verified_user),
+):
+    """Get the most recent active session for the current user."""
+    session = GeminiSessions.get_active_session_by_user_id(user.id)
+    return {"session": session}
+
+
+@router.put("/session/{session_id}")
+async def update_session(
+    session_id: str,
+    form_data: UpdateSessionForm,
+    user: UserModel = Depends(get_verified_user),
+):
+    """Update a Gemini Live session (title, summary, status)."""
+    session = GeminiSessions.update_session(
+        id=session_id,
+        user_id=user.id,
+        title=form_data.title,
+        summary=form_data.summary,
+        status=form_data.status,
+    )
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found or not authorized")
+    return session
+
+
+@router.delete("/session/{session_id}")
+async def delete_session(
+    session_id: str,
+    user: UserModel = Depends(get_verified_user),
+):
+    """Delete a Gemini Live session and all its transcripts."""
+    success = GeminiSessions.delete_session(session_id, user.id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Session not found or not authorized")
+    return {"status": "ok", "message": "Session deleted"}
+
+
+####################################
+# Transcript Management Endpoints
+####################################
+
+
+@router.post("/transcript")
+async def add_transcript(
+    form_data: CreateTranscriptForm,
+    user: UserModel = Depends(get_verified_user),
+):
+    """Add a transcript entry to a Gemini Live session."""
+    # Verify user owns the session
+    session = GeminiSessions.get_session_by_id(form_data.session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if session.user_id != user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to add to this session")
+
+    transcript = GeminiTranscripts.add_transcript(
+        session_id=form_data.session_id,
+        role=form_data.role,
+        content=form_data.content,
+        audio_duration=form_data.audio_duration,
+    )
+    if not transcript:
+        raise HTTPException(status_code=500, detail="Failed to add transcript")
+    return transcript
+
+
+@router.get("/transcripts/{session_id}")
+async def get_transcripts(
+    session_id: str,
+    limit: int = 100,
+    offset: int = 0,
+    user: UserModel = Depends(get_verified_user),
+):
+    """Get all transcripts for a Gemini Live session."""
+    # Verify user owns the session
+    session = GeminiSessions.get_session_by_id(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if session.user_id != user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to access this session")
+
+    transcripts = GeminiTranscripts.get_transcripts_by_session_id(
+        session_id=session_id,
+        limit=limit,
+        offset=offset,
+    )
+    return {"transcripts": transcripts}
+
+
+@router.get("/transcripts/{session_id}/recent")
+async def get_recent_transcripts(
+    session_id: str,
+    limit: int = 50,
+    user: UserModel = Depends(get_verified_user),
+):
+    """Get the most recent transcripts for context restoration."""
+    # Verify user owns the session
+    session = GeminiSessions.get_session_by_id(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if session.user_id != user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to access this session")
+
+    transcripts = GeminiTranscripts.get_recent_transcripts(
+        session_id=session_id,
+        limit=limit,
+    )
+
+    # Also format for easy context injection
+    formatted = GeminiTranscripts.format_transcript_for_context(transcripts)
+
+    return {
+        "transcripts": transcripts,
+        "formatted": formatted,
+        "count": len(transcripts),
+    }
+
+
+@router.get("/transcripts/{session_id}/since/{timestamp}")
+async def get_transcripts_since(
+    session_id: str,
+    timestamp: int,
+    user: UserModel = Depends(get_verified_user),
+):
+    """Get transcripts since a specific timestamp (for incremental sync)."""
+    # Verify user owns the session
+    session = GeminiSessions.get_session_by_id(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if session.user_id != user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to access this session")
+
+    transcripts = GeminiTranscripts.get_transcripts_since(
+        session_id=session_id,
+        since_timestamp=timestamp,
+    )
+    return {"transcripts": transcripts}
+
+
+####################################
+# Context Restoration Endpoint
+####################################
+
+
+@router.get("/context/{session_id}")
+async def get_session_context(
+    session_id: str,
+    transcript_limit: int = 50,
+    user: UserModel = Depends(get_verified_user),
+):
+    """
+    Get full context for session restoration after timeout.
+
+    Returns the session summary and recent transcripts formatted
+    for injection into the Gemini Live system prompt.
+    """
+    # Verify user owns the session
+    session = GeminiSessions.get_session_by_id(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if session.user_id != user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to access this session")
+
+    # Get recent transcripts
+    transcripts = GeminiTranscripts.get_recent_transcripts(
+        session_id=session_id,
+        limit=transcript_limit,
+    )
+    formatted_transcripts = GeminiTranscripts.format_transcript_for_context(transcripts)
+
+    # Build the context restoration prompt
+    context_prompt = build_context_restoration_prompt(
+        summary=session.summary,
+        transcripts=formatted_transcripts,
+    )
+
+    return {
+        "session": session,
+        "transcripts": transcripts,
+        "formatted_transcripts": formatted_transcripts,
+        "context_prompt": context_prompt,
+    }
+
+
+def build_context_restoration_prompt(
+    summary: Optional[str],
+    transcripts: str,
+) -> str:
+    """Build the context restoration prompt for reconnection."""
+    prompt_parts = [
+        "[SESSION RESTORATION - Please read carefully before responding]",
+        "",
+    ]
+
+    if summary:
+        prompt_parts.extend([
+            "PREVIOUS CONTEXT:",
+            summary,
+            "",
+        ])
+
+    if transcripts:
+        prompt_parts.extend([
+            "RECENT CONVERSATION:",
+            transcripts,
+            "",
+        ])
+
+    prompt_parts.extend([
+        "CURRENT SCREEN:",
+        "[Analyzing shared screen/webcam...]",
+        "",
+        "INSTRUCTIONS:",
+        "1. Read the context and recent conversation carefully",
+        "2. Look at what's currently on screen",
+        "3. Use deductive reasoning to understand:",
+        "   - What problem were we solving?",
+        "   - What approach were we taking?",
+        "   - Where did we leave off?",
+        "   - What's the current state based on the screen?",
+        "4. Begin your response with a brief confirmation:",
+        '   "I see we were working on [X]. Based on the screen, it looks like [Y]. Let me continue from there..."',
+        "5. Only proceed once you're confident you understand the context",
+        "",
+        "If anything is unclear, ask for clarification before continuing.",
+    ])
+
+    return "\n".join(prompt_parts)
